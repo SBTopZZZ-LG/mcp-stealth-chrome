@@ -11,12 +11,14 @@ both surfaced by the registry gate).
 """
 import sys
 
-EXPECTED_COUNT = 138
+EXPECTED_COUNT = 139
 EXPECTED_TOOLS = {
     # Lifecycle
     "browser_launch", "browser_close", "browser_recover",
     # Attach / inspect external Chrome (v0.4.8)
     "attach_to_chrome", "detach", "list_external_chrome",
+    # Remote / hosted browser (Browserless, generic CDP) — v0.4.13
+    "connect_remote_browser",
     # Navigation
     "navigate", "go_back", "go_forward", "reload",
     # DOM / content
