@@ -5,7 +5,8 @@ description = "Stealth Chrome MCP server — nodriver + Chromium + 80+ tools wit
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "RobithYusuf", email = "robithdev@gmail.com" }
+    { name = "RobithYusuf", email = "robithdev@gmail.com" },
+    { name = "SaumitraTopinkatti", email = "dev1912.sbtopzzz@gmail.com" }
 ]
 keywords = [
     "mcp",
@@ -44,9 +45,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/RobithYusuf/mcp-stealth-chrome"
-Repository = "https://github.com/RobithYusuf/mcp-stealth-chrome"
-Issues = "https://github.com/RobithYusuf/mcp-stealth-chrome/issues"
+Homepage = "https://github.com/SBTopZZZ-LG/mcp-stealth-chrome"
+Repository = "https://github.com/SBTopZZZ-LG/mcp-stealth-chrome"
+Issues = "https://github.com/SBTopZZZ-LG/mcp-stealth-chrome/issues"
 
 [project.scripts]
 mcp-stealth-chrome = "mcp_stealth_chrome.server:main"

@@ -223,7 +223,7 @@ SDK standard env convention (`OPENAI_API_KEY`, `OPENAI_BASE_URL`).
 If you want to contribute or modify:
 
 ```bash
-git clone https://github.com/RobithYusuf/mcp-stealth-chrome
+git clone https://github.com/SBTopZZZ-LG/mcp-stealth-chrome
 cd mcp-stealth-chrome
 uv sync                         # installs all deps in .venv
 uv run mcp-stealth-chrome       # run stdio server locally (exit with Ctrl+C)

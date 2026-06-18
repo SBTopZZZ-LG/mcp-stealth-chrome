@@ -26,17 +26,17 @@ claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
 
 | Site | Challenge | Result |
 |------|-----------|--------|
-| `bot.sannysoft.com` | All fingerprint tests | ✅ 100% pass ([proof](https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/sannysoft.jpg)) |
-| `2captcha.com/demo/cloudflare-turnstile` | Turnstile visible | ✅ Passed via `click_turnstile()` ([proof](https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/turnstile.jpg)) |
-| `arh.antoinevastel.com/.../areyouheadless` | Headless-chrome detection | ✅ "You are not Chrome headless" ([proof](https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/areyouheadless.jpg)) |
-| `browserscan.net/bot-detection` | WebDriver/Selenium/CDP/Headless | ✅ All categories "Normal" ([proof](https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/browserscan.jpg)) |
+| `bot.sannysoft.com` | All fingerprint tests | ✅ 100% pass ([proof](https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/sannysoft.jpg)) |
+| `2captcha.com/demo/cloudflare-turnstile` | Turnstile visible | ✅ Passed via `click_turnstile()` ([proof](https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/turnstile.jpg)) |
+| `arh.antoinevastel.com/.../areyouheadless` | Headless-chrome detection | ✅ "You are not Chrome headless" ([proof](https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/areyouheadless.jpg)) |
+| `browserscan.net/bot-detection` | WebDriver/Selenium/CDP/Headless | ✅ All categories "Normal" ([proof](https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/browserscan.jpg)) |
 | `tls.browserleaks.com` | TLS JA3/JA4 fingerprint | ✅ Real Chrome/Firefox/Safari JA3 hashes ([see output below](#tls-fingerprint-proof)) |
 | `httpbin.org` | Multi-instance isolation | ✅ Two browsers parallel |
-| `google.com/recaptcha/api2/demo` | **reCAPTCHA v2 image challenge** | ✅ **5/5 = 100%** via `solve_recaptcha_ai()` ([proof](https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/recaptcha.jpg)) |
+| `google.com/recaptcha/api2/demo` | **reCAPTCHA v2 image challenge** | ✅ **5/5 = 100%** via `solve_recaptcha_ai()` ([proof](https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/recaptcha.jpg)) |
 
 ### 🎯 click_turnstile → Cloudflare Turnstile Bypass
 
-<img src="https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/turnstile.jpg" alt="Cloudflare Turnstile solved" width="500">
+<img src="https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/turnstile.jpg" alt="Cloudflare Turnstile solved" width="500">
 
 **One-liner bypass** on supported widget shapes. `click_turnstile()` → checkbox switches from "Verify you are human" ☐ to **"Success!" ✅**.
 
@@ -46,19 +46,19 @@ claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
 
 ### 🧪 bot.sannysoft.com → All Fingerprint Tests Pass
 
-<img src="https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/sannysoft.jpg" alt="Fingerprint tests all passed" width="500">
+<img src="https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/sannysoft.jpg" alt="Fingerprint tests all passed" width="500">
 
 `navigator.webdriver` missing, WebDriver Advanced passed, Chrome present, Plugins detected correctly, PHANTOM_* probes all ok, WebGL shows real `Apple M1 Pro` GPU — nodriver's CDP-direct approach leaves zero automation traces.
 
 ### 🤖 areyouheadless → Headless Chrome Detection
 
-<img src="https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/areyouheadless.jpg" alt="areyouheadless pass" width="500">
+<img src="https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/areyouheadless.jpg" alt="areyouheadless pass" width="500">
 
 Antoine Vastel's public headless-detection test says **"You are not Chrome headless"** — even though we run Chrome controlled programmatically.
 
 ### 🔍 browserscan.net/bot-detection → All Categories Normal
 
-<img src="https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/browserscan.jpg" alt="browserscan all normal" width="500">
+<img src="https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/browserscan.jpg" alt="browserscan all normal" width="500">
 
 14 signals checked (WebDriver, WebDriver Advance, Selenium, NightmareJS, PhantomJS, Awesomium, Cef, CefSharp, Coaches, FMiner, Born, Phantomas, Rhino, Webdriverio, Headless Chrome, CDP, Dev Tool, Native Navigator) — every one returns **"Normal"**.
 
@@ -77,7 +77,7 @@ Each impersonation produces **authentic browser JA3/JA4** — Cloudflare, DataDo
 
 ### 🏆 reCAPTCHA v2 Benchmark (5 consecutive runs)
 
-<img src="https://raw.githubusercontent.com/RobithYusuf/mcp-stealth-chrome/main/docs/images/recaptcha.jpg" alt="reCAPTCHA v2 solved" width="350">
+<img src="https://raw.githubusercontent.com/SBTopZZZ-LG/mcp-stealth-chrome/main/docs/images/recaptcha.jpg" alt="reCAPTCHA v2 solved" width="350">
 
 Fresh profile + mouse drift warmup + an OpenAI-compatible vision model:
 
@@ -202,7 +202,7 @@ Compared to the leading Python stealth MCP ([vibheksoni/stealth-browser-mcp](htt
 | Precision Mouse Kit (11 tools) | ✅ **Unique** | ❌ |
 | Multi-instance + idle reaper | ✅ | ✅ |
 | Install | `uvx` zero-setup | `git clone + pip` |
-| Sister Firefox package | ✅ [mcp-camoufox](https://github.com/RobithYusuf/mcp-camoufox) | ❌ |
+| Sister Firefox package | ✅ [mcp-camoufox](https://github.com/SBTopZZZ-LG/mcp-camoufox) | ❌ |
 | Network interception hooks | ⚠️ basic | ✅ **AI-generated Python hooks** |
 | Pixel-perfect element cloning | ⚠️ basic | ✅ **300+ CSS + events** |
 
@@ -786,7 +786,7 @@ When using remote/hosted browsers (Browserless, generic CDP), the stealth compat
 
 ## Sister Package
 
-[mcp-camoufox](https://github.com/RobithYusuf/mcp-camoufox) — Firefox stealth with same API. Use when you need:
+[mcp-camoufox](https://github.com/SBTopZZZ-LG/mcp-camoufox) — Firefox stealth with same API. Use when you need:
 - Hardest anti-bot bypass (Camoufox C++ level patches = stealth score 6% CreepJS)
 - Firefox-specific rendering
 - Node.js ecosystem
@@ -796,7 +796,7 @@ Both packages share tool names, snapshot format, ref system — switch seamlessl
 ## Development
 
 ```bash
-git clone https://github.com/RobithYusuf/mcp-stealth-chrome
+git clone https://github.com/SBTopZZZ-LG/mcp-stealth-chrome
 cd mcp-stealth-chrome
 uv sync
 uv run mcp-stealth-chrome       # run stdio server locally
@@ -812,7 +812,7 @@ uv run python /tmp/smoke-test.py      # full smoke test (see /tmp/ examples)
 - [nodriver](https://github.com/ultrafunkamsterdam/nodriver) by ultrafunkamsterdam — undetected Chrome via CDP
 - [curl_cffi](https://github.com/lexiforest/curl_cffi) by lexiforest — TLS browser impersonation
 - [FastMCP](https://github.com/modelcontextprotocol/python-sdk) — Python MCP SDK
-- [Camoufox](https://github.com/daijro/camoufox) by daijro — sister Firefox stealth (via [mcp-camoufox](https://github.com/RobithYusuf/mcp-camoufox))
+- [Camoufox](https://github.com/daijro/camoufox) by daijro — sister Firefox stealth (via [mcp-camoufox](https://github.com/SBTopZZZ-LG/mcp-camoufox))
 - [CapSolver](https://capsolver.com) — CAPTCHA solving API
 - [vibheksoni/stealth-browser-mcp](https://github.com/vibheksoni/stealth-browser-mcp) — complementary MCP for UI cloning & network hooks
 
