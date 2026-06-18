@@ -15,7 +15,8 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Tuple
+from dataclasses import dataclass
 
 import httpx
 
@@ -391,8 +392,22 @@ async def browser_launch(
     auto_verify: bool = True,
     user_data_dir: Optional[str] = None,
     profile_directory: Optional[str] = None,
+    remote_url: Optional[str] = None,
+    remote_token: Optional[str] = None,
+    instance_id: str = "main",
 ) -> str:
     """Launch stealth Chrome via nodriver. Creates persistent profile by default.
+
+    Two modes:
+      • Local (default): spawns a local Chrome/Chromium and manages a
+        profile at ~/.mcp-stealth/profile (or a path you specify).
+      • Remote: pass `remote_url` (e.g. "http://localhost:3000" for a
+        self-hosted Browserless Docker, or "https://chrome.browserless.io"
+        for cloud) to connect to an existing browser via CDP. Optional
+        `remote_token` for Bearer auth. In remote mode, no local Chrome
+        is launched; the upstream browser is left running when you call
+        browser_close() / detach(). Set REMOTE_BROWSER_URL env var to
+        default to remote mode without passing the argument each time.
 
     Args:
         url: initial URL to load
@@ -421,9 +436,55 @@ async def browser_launch(
             inside it (e.g. "Default", "Profile 21"). Without this, Chrome
             uses "Default". Helpful to drive a specific persona without
             cloning the profile. Use list_chrome_profiles to enumerate.
+        remote_url: connect to a remote/hosted browser via CDP instead of
+            launching locally. Disables local-only setup (no profile lock
+            checks, no --window-position, etc). Incompatible with
+            user_data_dir / profile_directory / testing_mode.
+        remote_token: Bearer token for the remote endpoint (Browserless
+            cloud). Also accepted via ?token= in remote_url.
+        instance_id: name for this connection (default "main"). Use
+            distinct IDs with `switch_instance` to keep multiple browsers.
     """
     if BrowserState.is_up():
         return ok(f"Browser already running with {len(BrowserState.tabs)} tab(s).")
+    # Remote mode short-circuit — delegate to the same shared launcher path
+    # as `connect_remote_browser` / `spawn_browser(remote_url=...)`. This
+    # keeps the "no local Chrome, no profile lock, leave upstream running"
+    # semantics in ONE place.
+    eff_remote_url = remote_url or os.environ.get("REMOTE_BROWSER_URL")
+    eff_remote_token = remote_token or os.environ.get("REMOTE_BROWSER_TOKEN")
+    if eff_remote_url:
+        if user_data_dir or profile_directory:
+            return err("remote_url is incompatible with user_data_dir / profile_directory")
+        if testing_mode:
+            return err("testing_mode is a local-launch flag; not valid with remote_url")
+        ok_flag, msg = await _launch_browser_instance(
+            instance_id=instance_id,
+            url=url,
+            headless=headless,
+            proxy=proxy,
+            user_agent=user_agent,
+            window_width=window_width,
+            window_height=window_height,
+            persistent=persistent,
+            lang=lang,
+            extra_args=extra_args,
+            storage_state_path=storage_state_path,
+            idle_timeout=0,  # never auto-close remote browsers
+            remote_url=eff_remote_url,
+            remote_token=eff_remote_token,
+        )
+        if not ok_flag:
+            return err(msg)
+        # Run auto-verify on the initial tab the same way the local path does.
+        tab = BrowserState.active_tab()
+        verify_suffix = ""
+        if auto_verify and tab is not None:
+            try:
+                verify_suffix = await asyncio.wait_for(_auto_verify_cf(tab), timeout=25.0)
+            except Exception:
+                verify_suffix = ""
+        return ok(msg + verify_suffix)
 
     if _LAUNCH_LOCK.locked():
         return err("another launch is already in progress — wait for it to finish")
@@ -721,17 +782,33 @@ async def browser_launch(
 
 @mcp.tool()
 async def browser_close() -> str:
-    """Close the browser and free the profile lock."""
+    """Close the browser and free the profile lock.
+
+    For locally-spawned browsers: calls browser.stop() (terminates the Chrome
+    subprocess) and cleans the default profile.
+    For attached / remote browsers (Browserless cloud, self-hosted Docker,
+    attach_to_chrome, browser_launch(remote_url=...)): closes only the CDP
+    websocket and leaves the upstream browser running. Use detach() for
+    the same effect with a different return message.
+    """
     if not BrowserState.is_up():
         return ok("Browser was not running.")
+    _closed_iid = BrowserState.current_instance_id
+    was_attached = _closed_iid in _ATTACHED_BROWSERS
     try:
-        if BrowserState.browser:
-            BrowserState.browser.stop()
+        if was_attached:
+            # Close just the websocket, leave the upstream browser alive.
+            conn = getattr(BrowserState.browser, "connection", None) if BrowserState.browser else None
+            if conn is not None:
+                try:
+                    await conn.aclose()
+                except Exception:
+                    pass
+        else:
+            if BrowserState.browser:
+                BrowserState.browser.stop()
     except Exception as e:
         return err(f"close failed: {e}")
-    # Capture the id BEFORE reset() (which may change current_instance_id) so
-    # we can drop any attached-browser bookkeeping for it.
-    _closed_iid = BrowserState.current_instance_id
     BrowserState.reset()
     _ATTACHED_BROWSERS.discard(_closed_iid)
     # Clear transient caches that key off tab identity (id() can be reused).
@@ -755,9 +832,12 @@ async def browser_close() -> str:
         _NETWORK_ARMED_TAB_IDS.clear()
     except Exception:
         pass
-    # Mark profile as cleanly exited so next launch skips restore dialog
-    clean_profile_state(PROFILE_DIR)
-    return ok("Browser closed.")
+    # Mark profile as cleanly exited so next launch skips restore dialog.
+    # Skip for attached/remote — no local profile to clean.
+    if not was_attached:
+        clean_profile_state(PROFILE_DIR)
+    suffix = " (upstream browser left running — use detach() next time)" if was_attached else ""
+    return ok(f"Browser closed.{suffix}")
 
 
 @mcp.tool()
@@ -781,16 +861,27 @@ async def browser_recover() -> str:
     steps: list[str] = []
 
     # 1. Best-effort stop. Capture profile dir BEFORE reset so step 2 can
-    #    target only Chrome PIDs that belong to this profile.
+    #    target only Chrome PIDs that belong to this profile. For attached
+    #    browsers (Browserless / attach_to_chrome) we close only the
+    #    websocket — killing the upstream browser is never the right move.
     target_profile = BrowserState.current_profile_dir
     try:
         b = BrowserState.browser
-        if b and not getattr(b, "stopped", False):
-            try:
-                b.stop()
-                steps.append("browser.stop() ok")
-            except Exception as e:
-                steps.append(f"browser.stop() failed: {type(e).__name__}")
+        if b:
+            if BrowserState.current_instance_id in _ATTACHED_BROWSERS:
+                conn = getattr(b, "connection", None)
+                if conn is not None:
+                    try:
+                        await conn.aclose()
+                    except Exception:
+                        pass
+                steps.append("connection.aclose() ok (attached)")
+            elif not getattr(b, "stopped", False):
+                try:
+                    b.stop()
+                    steps.append("browser.stop() ok")
+                except Exception as e:
+                    steps.append(f"browser.stop() failed: {type(e).__name__}")
     except Exception:
         pass
 
@@ -3068,6 +3159,7 @@ async def network_get(
 @mcp.tool()
 async def server_status() -> str:
     """Diagnostic info about the server and browser."""
+    cur_iid = BrowserState.current_instance_id
     status = {
         "version": __version__,
         "browser_running": BrowserState.is_up(),
@@ -3079,6 +3171,13 @@ async def server_status() -> str:
         "network_logs": len(BrowserState.network_logs),
         "page_errors": len(BrowserState.page_errors),
         "profile_dir": str(PROFILE_DIR),
+        "current_instance": cur_iid,
+        "current_mode": (
+            "remote/attached" if cur_iid in _ATTACHED_BROWSERS
+            else ("local" if BrowserState.is_up() else "none")
+        ),
+        "attached_instances": sorted(_ATTACHED_BROWSERS),
+        "remote_browser_url_env": bool(os.environ.get("REMOTE_BROWSER_URL")),
     }
     return ok(json.dumps(status, indent=2))
 
@@ -3917,6 +4016,118 @@ from .tools.network_http import (  # noqa: F401
 # Idle instances auto-close after configurable timeout (prevents memory leaks).
 
 
+async def _launch_remote_instance(
+    instance_id: str,
+    url: str,
+    headless: bool,
+    user_agent: Optional[str],
+    storage_state_path: Optional[str],
+    idle_timeout: int,
+    remote_url: str,
+    remote_token: Optional[str],
+) -> tuple[bool, str]:
+    """Spawn a connection to a remote browser (Browserless / generic CDP).
+
+    Mirrors _launch_browser_instance's flow but skips all the local-only
+    setup (Chrome binary lookup, profile dir, lock checks, --window-* flags,
+    clean_profile_state). The returned instance is added to
+    _ATTACHED_BROWSERS so close paths don't call .stop() on the upstream
+    browser.
+
+    On success, instance is set as the current BrowserState (or stored
+    as a non-current snapshot if instance_id differs from current).
+    """
+    try:
+        target = _parse_remote_target(remote_url, remote_token)
+    except ValueError as e:
+        return False, f"invalid remote_url: {e}"
+
+    # 1. Probe + connect via the shared helper
+    browser, info, error = await _connect_remote(target, instance_id)
+    if error or browser is None:
+        return False, error or "remote connect failed (no error message)"
+
+    # 2. Apply user_agent override via CDP (matching what the local path
+    #    does with --user-agent=). No --user-agent flag for remote — the
+    #    upstream browser is already running with its own config.
+    if user_agent:
+        try:
+            from nodriver.cdp import network as cdp_network
+            main_tab = browser.main_tab or (browser.tabs[0] if browser.tabs else None)
+            if main_tab is not None:
+                await main_tab.send(cdp_network.set_user_agent_override(
+                    user_agent=user_agent,
+                ))
+        except Exception:
+            pass  # best-effort; some remote providers lock the UA flag
+
+    # 3. Apply storage_state (cookies + localStorage) BEFORE initial nav
+    if storage_state_path:
+        try:
+            await _apply_storage_state(browser, storage_state_path)
+        except Exception as e:
+            try:
+                await _safe_stop_browser(browser)
+            except Exception:
+                pass
+            return False, f"storage_state load failed: {e}"
+
+    # 4. Initial navigation to the requested URL (best-effort — remote
+    #    browsers may already have a tab open at a useful URL; failure
+    #    here is non-fatal because the user can navigate() next).
+    nav_note = ""
+    try:
+        main_tab = browser.main_tab
+        if main_tab is None:
+            await browser.update_targets()
+            main_tab = browser.tabs[0] if browser.tabs else None
+        if main_tab is None:
+            main_tab = await asyncio.wait_for(
+                browser.get(url), timeout=BROWSER_NAV_TIMEOUT,
+            )
+        else:
+            await asyncio.wait_for(main_tab.get(url), timeout=BROWSER_NAV_TIMEOUT)
+        try:
+            await asyncio.wait_for(main_tab.wait(t=2), timeout=BROWSER_NAV_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+    except Exception as e:
+        nav_note = f" (initial nav warning: {e})"
+
+    # 5. Store the connection as a current or non-current instance.
+    #    Always mark as attached — close paths must NOT call .stop() on
+    #    the remote browser.
+    if instance_id == BrowserState.current_instance_id:
+        _set_active_browser(browser, instance_id, attached=True, profile_dir=None,
+                            idle_timeout=idle_timeout)
+        BrowserState.tabs = list(browser.tabs)
+        BrowserState.active_tab_index = 0
+    else:
+        snap = InstanceSnapshot(
+            instance_id=instance_id,
+            browser=browser,
+            tabs=list(browser.tabs),
+            active_tab_index=0,
+            profile_dir=None,
+            idle_timeout=idle_timeout,
+            last_active=time.time(),
+            created_at=time.time(),
+        )
+        BrowserState.instances[instance_id] = snap
+        _ATTACHED_BROWSERS.add(instance_id)
+        _set_active_browser(browser, instance_id, attached=True, profile_dir=None,
+                            idle_timeout=idle_timeout)
+        BrowserState.tabs = list(browser.tabs)
+        BrowserState.active_tab_index = 0
+
+    _ensure_idle_reaper_running()
+    browser_label = info.get("Browser") or target.host
+    return True, (
+        f"remote browser {instance_id!r} connected (target={target.base_url}, "
+        f"browser={browser_label}, tabs={len(browser.tabs)}{nav_note})"
+    )
+
+
 async def _launch_browser_instance(
     instance_id: str,
     url: str,
@@ -3931,11 +4142,33 @@ async def _launch_browser_instance(
     storage_state_path: Optional[str],
     idle_timeout: int,
     profile_dir_override: Optional[str] = None,
+    remote_url: Optional[str] = None,
+    remote_token: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Shared launcher for browser_launch + spawn_browser.
 
     Returns (success, message).
+
+    Modes:
+      • remote_url set → connect to a remote browser via CDP; no local
+        Chrome is launched, no profile dir is created, the upstream
+        browser is left running on close (instance added to
+        _ATTACHED_BROWSERS so browser_close / close_instance call
+        .connection.aclose() instead of .stop()).
+      • remote_url None → spawn a local Chrome (original behavior).
     """
+    if remote_url:
+        return await _launch_remote_instance(
+            instance_id=instance_id,
+            url=url,
+            headless=headless,
+            user_agent=user_agent,
+            storage_state_path=storage_state_path,
+            idle_timeout=idle_timeout,
+            remote_url=remote_url,
+            remote_token=remote_token,
+        )
+
     # Pre-flight: ensure Chrome is installed before calling nodriver
     chrome_path = find_chrome_binary()
     if chrome_path is None:
@@ -4125,15 +4358,24 @@ async def spawn_browser(
     storage_state_path: Optional[str] = None,
     idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT,
     profile_dir: Optional[str] = None,
+    remote_url: Optional[str] = None,
+    remote_token: Optional[str] = None,
 ) -> str:
     """Create a new named browser instance running in parallel with main.
     Each instance has its own profile, cookies, tabs, logs. Use for multi-account
     scraping or isolated sessions.
 
+    Pass `remote_url` to spawn a connection to a remote/hosted browser
+    (Browserless cloud, self-hosted Docker, etc.) instead of launching a
+    local Chrome. The upstream browser is left running on close. See
+    `connect_remote_browser` for the dedicated remote-only entry point.
+
     Args:
         instance_id: unique name (e.g., "scraper_1", "acct_alice")
         idle_timeout_seconds: auto-close after idle (0 = never, default 600s)
         profile_dir: override profile path (default: ~/.mcp-stealth/profiles/<id>/)
+        remote_url: connect to remote browser via CDP (overrides local launch)
+        remote_token: Bearer token for remote_url
         other args: same as browser_launch
 
     Use switch_instance(id) to route subsequent tool calls to this instance.
@@ -4142,6 +4384,8 @@ async def spawn_browser(
         return err(f"instance {instance_id!r} already running (current). Use switch_instance instead.")
     if instance_id in BrowserState.instances and BrowserState.instances[instance_id].is_running():
         return err(f"instance {instance_id!r} already running.")
+    if remote_url and (profile_dir or extra_args):
+        return err("remote_url is incompatible with profile_dir / extra_args (those are local-launch flags)")
     ok_flag, msg = await _launch_browser_instance(
         instance_id=instance_id,
         url=url,
@@ -4156,6 +4400,8 @@ async def spawn_browser(
         storage_state_path=storage_state_path,
         idle_timeout=idle_timeout_seconds,
         profile_dir_override=profile_dir,
+        remote_url=remote_url,
+        remote_token=remote_token,
     )
     if not ok_flag:
         return err(msg)
@@ -4214,32 +4460,52 @@ async def switch_instance(instance_id: str) -> str:
 
 @mcp.tool()
 async def close_instance(instance_id: str) -> str:
-    """⭐ Close a specific browser instance (frees profile + memory)."""
+    """⭐ Close a specific browser instance (frees profile + memory).
+
+    For attached/remote instances (Browserless, attach_to_chrome), only the
+    CDP websocket is closed; the upstream browser is left running."""
     # Close current
     if instance_id == BrowserState.current_instance_id:
         if BrowserState.is_up():
+            was_attached = instance_id in _ATTACHED_BROWSERS
             try:
-                if BrowserState.browser:
-                    BrowserState.browser.stop()
+                if was_attached:
+                    conn = getattr(BrowserState.browser, "connection", None)
+                    if conn is not None:
+                        try:
+                            await conn.aclose()
+                        except Exception:
+                            pass
+                else:
+                    if BrowserState.browser:
+                        BrowserState.browser.stop()
             except Exception as e:
                 return err(f"close failed: {e}")
-            _iid = BrowserState.current_instance_id
             BrowserState.reset()
-            if BrowserState.current_profile_dir:
+            if BrowserState.current_profile_dir and not was_attached:
                 clean_profile_state(BrowserState.current_profile_dir)
-            _ATTACHED_BROWSERS.discard(_iid)
+            _ATTACHED_BROWSERS.discard(instance_id)
             return ok(f"closed current instance {instance_id!r}")
         return ok(f"current instance {instance_id!r} was not running")
     # Close stored
     snap = BrowserState.instances.get(instance_id)
     if snap is None:
         return err(f"instance {instance_id!r} not found")
+    was_attached = instance_id in _ATTACHED_BROWSERS
     try:
-        if snap.browser:
-            snap.browser.stop()
+        if was_attached:
+            conn = getattr(snap.browser, "connection", None) if snap.browser else None
+            if conn is not None:
+                try:
+                    await conn.aclose()
+                except Exception:
+                    pass
+        else:
+            if snap.browser:
+                snap.browser.stop()
     except Exception:
         pass
-    if snap.profile_dir:
+    if snap.profile_dir and not was_attached:
         clean_profile_state(snap.profile_dir)
     BrowserState.instances.pop(instance_id, None)
     _ATTACHED_BROWSERS.discard(instance_id)
@@ -4248,29 +4514,51 @@ async def close_instance(instance_id: str) -> str:
 
 @mcp.tool()
 async def close_all_instances() -> str:
-    """⭐ Close every running browser instance. Useful for cleanup."""
+    """⭐ Close every running browser instance. Useful for cleanup.
+
+    Attached/remote instances are detached (websocket closed) rather than
+    killed; locally-spawned ones are stopped."""
     closed = []
     # Close stored
     for iid, snap in list(BrowserState.instances.items()):
+        was_attached = iid in _ATTACHED_BROWSERS
         try:
-            if snap.browser:
-                snap.browser.stop()
+            if was_attached:
+                conn = getattr(snap.browser, "connection", None) if snap.browser else None
+                if conn is not None:
+                    try:
+                        await conn.aclose()
+                    except Exception:
+                        pass
+            else:
+                if snap.browser:
+                    snap.browser.stop()
         except Exception:
             pass
-        if snap.profile_dir:
+        if snap.profile_dir and not was_attached:
             clean_profile_state(snap.profile_dir)
         closed.append(iid)
     BrowserState.instances.clear()
     # Close current
     if BrowserState.is_up():
+        cur_iid = BrowserState.current_instance_id
+        was_attached = cur_iid in _ATTACHED_BROWSERS
         try:
-            if BrowserState.browser:
-                BrowserState.browser.stop()
+            if was_attached:
+                conn = getattr(BrowserState.browser, "connection", None)
+                if conn is not None:
+                    try:
+                        await conn.aclose()
+                    except Exception:
+                        pass
+            else:
+                if BrowserState.browser:
+                    BrowserState.browser.stop()
         except Exception:
             pass
-        if BrowserState.current_profile_dir:
+        if BrowserState.current_profile_dir and not was_attached:
             clean_profile_state(BrowserState.current_profile_dir)
-        closed.append(BrowserState.current_instance_id)
+        closed.append(cur_iid)
     BrowserState.reset()
     for _iid in closed:
         _ATTACHED_BROWSERS.discard(_iid)
@@ -5967,7 +6255,7 @@ async def form_introspect(form_selector: Optional[str] = None) -> str:
 # ATTACH MODE — connect to existing Chrome via CDP (no new browser launch)
 # ══════════════════════════════════════════════════════════════════════════
 #
-# Requires the target Chrome to be started with `--remote-debugging-port=<N>`.
+# Requires the target Chrome to have been started with `--remote-debugging-port=<N>`.
 # macOS shorthand:
 #   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
 #     --remote-debugging-port=9222 --user-data-dir=/path/to/your/profile
@@ -5975,10 +6263,187 @@ async def form_introspect(form_selector: Optional[str] = None) -> str:
 # Then `attach_to_chrome(port=9222)` connects without spawning a new browser
 # and respects the existing tabs/cookies/profile (including Profile 21, etc).
 # `detach()` releases the connection but leaves Chrome running.
+#
+# Also supports remote browsers (Browserless self-hosted/cloud, generic
+# chromium-in-docker, etc.) via remote_url — see _parse_remote_target +
+# _connect_remote below, and the `connect_remote_browser` / `browser_launch(
+# remote_url=...)` entry points.
 
-# Tracks whether current BrowserState was created via attach (True) or
-# spawned by us (False). detach() is a no-op for spawned browsers.
+# Tracks which instances were attached (or remote-connected) rather than
+# spawned locally. close_instance / browser_close / close_all_instances
+# check this set and call .connection.aclose() instead of .stop() so the
+# upstream browser (your daily Chrome, Browserless container, etc.) is
+# left running.
 _ATTACHED_BROWSERS: set[str] = set()
+
+
+def _patch_nodriver_http_user_agent() -> None:
+    """Browserless (and some other hosted Chrome endpoints) reject
+    `urllib.request`'s default `User-Agent: Python-urllib/3.11` with HTTP 400
+    on `/json/version` and `/json/list`. nodriver's `HTTPApi._request` uses
+    `urllib.request` with no custom UA, so its `start()` probe always fails
+    on those endpoints and surfaces the misleading "running as root /
+    no_sandbox=True" error from `Browser.start`.
+
+    Patch once at import time so every nodriver start (local or remote) sends
+    a real browser UA. Safe for localhost Chrome too — it just looks like a
+    regular browser probe.
+    """
+    try:
+        from nodriver.core.browser import HTTPApi
+    except Exception:
+        return  # nodriver not installed; nothing to patch
+    if getattr(HTTPApi, "_mcp_stealth_ua_patched", False):
+        return
+    import json as _json
+    import urllib.parse as _up
+    import urllib.request as _ur
+
+    async def _patched_request(self, endpoint, method: str = "get", data: dict = None):
+        url = _up.urljoin(
+            self.api, f"json/{endpoint}" if endpoint else "/json"
+        )
+        if not url:
+            url = self.api + endpoint
+        request = _ur.Request(url)
+        request.add_header(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) HeadlessChrome/121.0.6167.57 Safari/537.36",
+        )
+        request.method = method.upper()
+        request.data = None
+        if data:
+            request.data = _json.dumps(data).encode("utf-8")
+        response = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _ur.urlopen(request, timeout=10)
+        )
+        return _json.loads(response.read())
+
+    HTTPApi._request = _patched_request  # type: ignore[assignment]
+    HTTPApi._mcp_stealth_ua_patched = True  # type: ignore[attr-defined]
+
+
+_patch_nodriver_http_user_agent()
+
+
+@dataclass
+class _RemoteTarget:
+    """Parsed remote browser endpoint. Used by both `attach_to_chrome` and
+    `browser_launch(remote_url=...)` / `connect_remote_browser`."""
+    host: str
+    port: int
+    scheme: str = "http"          # "http" for self-hosted, "https" for cloud
+    token: Optional[str] = None   # Bearer token; appended as ?token= for Browserless
+    base_url: str = ""            # full base URL incl. scheme://host:port[/prefix]
+
+
+def _parse_remote_target(remote_url: str, remote_token: Optional[str] = None) -> _RemoteTarget:
+    """Parse a remote browser URL into a _RemoteTarget.
+
+    Accepts:
+      - http://localhost:3000           → host=localhost port=3000 scheme=http
+      - http://192.168.1.10:9222       → host=192.168.1.10 port=9222 scheme=http
+      - https://chrome.browserless.io  → host=chrome.browserless.io port=443 scheme=https
+      - chrome://settings (ignored — wrong scheme; we treat scheme as netloc scheme)
+
+    Token resolution order: explicit remote_token > ?token= in the URL > ""."""
+    from urllib.parse import urlparse, parse_qs
+    u = urlparse(remote_url)
+    scheme = (u.scheme or "http").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"remote_url must use http or https, got {scheme!r}"
+        )
+    host = u.hostname or "127.0.0.1"
+    port = u.port or (443 if scheme == "https" else 3000)
+    qs = parse_qs(u.query or "")
+    token = remote_token or (qs.get("token", [None])[0])
+    base = f"{scheme}://{host}:{port}" + (u.path.rstrip("/") if u.path and u.path != "/" else "")
+    return _RemoteTarget(host=host, port=port, scheme=scheme, token=token, base_url=base)
+
+
+async def _probe_cdp(target: _RemoteTarget, timeout: float = 5.0) -> dict:
+    """Probe the CDP /json/version endpoint. Returns parsed info dict.
+
+    Raises on connection/auth/parse failure with a clear actionable message.
+    Adds Authorization header (and ?token= query) when a token is set so
+    Browserless cloud auth works.
+    """
+    base = target.base_url or f"{target.scheme}://{target.host}:{target.port}"
+    url = f"{base}/json/version"
+    headers: dict[str, str] = {}
+    params: dict[str, str] = {}
+    if target.token:
+        headers["Authorization"] = f"Bearer {target.token}"
+        params["token"] = target.token  # Browserless also accepts query param
+    async with httpx.AsyncClient(timeout=timeout) as cli:
+        r = await cli.get(url, headers=headers, params=params)
+    if r.status_code == 401 or r.status_code == 403:
+        raise RuntimeError(
+            f"CDP auth failed ({r.status_code}) at {url}. "
+            "If this is Browserless cloud, set remote_token (or pass ?token= in the URL)."
+        )
+    r.raise_for_status()
+    try:
+        return r.json()
+    except Exception as e:
+        raise RuntimeError(f"CDP probe at {url} returned non-JSON: {e}")
+
+
+async def _connect_remote(
+    target: _RemoteTarget, instance_id: str, timeout: float = BROWSER_LAUNCH_TIMEOUT,
+) -> tuple[Optional[Browser], dict, Optional[str]]:
+    """Probe + connect to a remote browser. Returns (browser, info, error).
+
+    On error, browser is None and error is set. On success, info contains
+    the parsed /json/version payload (Browser, webSocketDebuggerUrl, etc).
+
+    Strategy:
+      1. Probe /json/version with auth to confirm reachability + auth.
+      2. If response includes webSocketDebuggerUrl, pass it as
+         browser_ws_endpoint (nodriver's Config accepts **kwargs). This is
+         the Browserless-cloud path where each session gets its own wss://.
+      3. Otherwise, use host+port (self-hosted Browserless / generic CDP).
+    """
+    try:
+        info = await _probe_cdp(target)
+    except Exception as e:
+        return None, {}, (
+            f"CDP probe failed at {target.base_url}/json/version — {e}. "
+            "Verify the URL, that the browser exposes CDP, and that any token is correct."
+        )
+    ws_url = (info.get("webSocketDebuggerUrl") or "").strip()
+    try:
+        if ws_url and ws_url.lower().startswith(("ws://", "wss://")):
+            config = Config(
+                host=target.host, port=target.port,
+                browser_ws_endpoint=ws_url,
+            )
+        else:
+            config = Config(host=target.host, port=target.port)
+        browser = await asyncio.wait_for(
+            nodriver.start(config=config), timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return None, info, f"remote connect timed out after {timeout}s — {target.base_url}"
+    except Exception as e:
+        msg = f"remote connect failed: {e}"
+        if "no_sandbox" in str(e) or "running as root" in str(e) or "sandbox" in str(e).lower():
+            msg += (
+                " | Hint: the remote Chromium is running as root inside its container. "
+                "Restart it with --no-sandbox, e.g. for Browserless Docker add "
+                "`-e DEFAULT_LAUNCH_ARGS='--no-sandbox'` or pass `--no-sandbox` after the image name: "
+                "`docker run ... browserless/chrome:latest --no-sandbox`."
+            )
+        elif "400" in str(e) or "Bad Request" in str(e):
+            msg += (
+                " | Hint: the remote endpoint rejected the request. "
+                "Verify the URL is correct and the server is running. "
+                "If using Browserless, ensure it is started with `--no-sandbox`."
+            )
+        return None, info, msg
+    return browser, info, None
 
 
 @mcp.tool()
@@ -6110,6 +6575,11 @@ async def attach_to_chrome(
     - Drive a Chrome session you launched manually with custom flags.
     - Connect to a remote/Docker Chrome via host=<remote> port=<N>.
 
+    For hosted remote browsers (Browserless cloud, generic chromium-in-docker
+    with token auth), prefer `connect_remote_browser(remote_url=...)` or
+    pass `remote_url` to `browser_launch()` — that path also handles
+    Authorization headers and the cloud-style `webSocketDebuggerUrl` flow.
+
     To detach without closing Chrome, call detach(). Calling browser_close()
     after attach DOES close the target Chrome — use detach() instead if you
     want to keep it running.
@@ -6128,37 +6598,11 @@ async def attach_to_chrome(
                 "--remote-debugging-port=9222 --user-data-dir=/path/to/profile\n"
                 "Then call attach_to_chrome(port=9222) or just attach_to_chrome()."
             )
-    # Probe the CDP endpoint with httpx — fail fast with a clear message
-    # if the port isn't actually open or doesn't speak CDP.
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as cli:
-            r = await cli.get(f"http://{host}:{port}/json/version")
-            r.raise_for_status()
-            info = r.json()
-    except Exception as e:
-        return err(
-            f"CDP probe failed at http://{host}:{port}/json/version — {e}. "
-            "Make sure Chrome is running with --remote-debugging-port and the "
-            "port is reachable (no firewall, correct host)."
-        )
-
-    config = Config(host=host, port=port)
-    try:
-        browser = await asyncio.wait_for(
-            nodriver.start(config=config),
-            timeout=BROWSER_LAUNCH_TIMEOUT,
-        )
-    except Exception as e:
-        return err(f"attach failed after CDP probe ok: {e}")
-
-    BrowserState.browser = browser
-    BrowserState.current_instance_id = instance_id
-    BrowserState.current_profile_dir = None  # unknown — managed by external Chrome
-    BrowserState.current_idle_timeout = 0  # never auto-close attached browsers
-    BrowserState.current_last_active = time.time()
-    BrowserState.current_created_at = time.time()
-    _ATTACHED_BROWSERS.add(instance_id)
-    await _refresh_tabs()
+    target = _RemoteTarget(host=host, port=port, scheme="http")
+    browser, info, error = await _connect_remote(target, instance_id)
+    if error or browser is None:
+        return err(error or "attach failed (no error message)")
+    _set_active_browser(browser, instance_id, attached=True)
     return ok(
         f"Attached to existing Chrome at {host}:{port} as {instance_id!r}. "
         f"Browser: {info.get('Browser', '?')}, {len(BrowserState.tabs)} tab(s). "
@@ -6166,15 +6610,43 @@ async def attach_to_chrome(
     )
 
 
+def _set_active_browser(
+    browser: Browser,
+    instance_id: str,
+    *,
+    attached: bool,
+    profile_dir: Optional[Path] = None,
+    idle_timeout: int = 0,
+) -> None:
+    """Common state-write helper for attach / remote / spawn paths.
+
+    attached=True marks the instance in _ATTACHED_BROWSERS so close paths
+    call .connection.aclose() instead of .stop() (don't kill upstream Chrome
+    or shared remote pool).
+    """
+    BrowserState.browser = browser
+    BrowserState.current_instance_id = instance_id
+    BrowserState.current_profile_dir = profile_dir
+    BrowserState.current_idle_timeout = idle_timeout
+    BrowserState.current_last_active = time.time()
+    BrowserState.current_created_at = time.time()
+    if attached:
+        _ATTACHED_BROWSERS.add(instance_id)
+    # attached=False callers (spawn_browser / browser_launch) manage
+    # _ATTACHED_BROWSERS themselves.
+
+
 @mcp.tool()
 async def detach() -> str:
     """⭐ Release CDP connection to an attached Chrome WITHOUT closing it.
-    Only valid for browsers connected via attach_to_chrome — for browsers
-    spawned by browser_launch/spawn_browser this is equivalent to a no-op
+    Valid for any attached/remote browser — attach_to_chrome, browser_launch(
+    remote_url=...), connect_remote_browser, or spawn_browser(remote_url=...).
+    For locally-spawned browsers this is equivalent to a no-op
     (use browser_close instead).
 
-    After detach, Chrome keeps running with all tabs intact. You can
-    re-attach later with attach_to_chrome(port=...)."""
+    After detach, the upstream browser keeps running with all tabs intact.
+    You can re-attach later with attach_to_chrome(port=...) or
+    connect_remote_browser(remote_url=...)."""
     iid = BrowserState.current_instance_id
     if not BrowserState.is_up():
         return err("no browser currently attached/running")
@@ -6182,20 +6654,80 @@ async def detach() -> str:
         return err(
             f"current browser ({iid!r}) was launched by us, not attached. "
             "Use browser_close() to close it. detach() only applies to "
-            "attach_to_chrome() connections."
+            "attached / remote connections."
         )
-    # Close just the websocket connection, leave the Chrome process alive.
+    # Close just the websocket connection, leave the upstream browser alive.
     try:
         if BrowserState.browser and getattr(BrowserState.browser, "connection", None):
             try:
                 await BrowserState.browser.connection.aclose()
             except Exception:
                 pass
-        # Don't call .stop() — that terminates Chrome.
+        # Don't call .stop() — that terminates the upstream browser.
     finally:
         _ATTACHED_BROWSERS.discard(iid)
         BrowserState.reset()
-    return ok(f"detached from {iid!r}. Chrome still running externally.")
+    return ok(f"detached from {iid!r}. Browser still running externally.")
+
+
+@mcp.tool()
+async def connect_remote_browser(
+    remote_url: str,
+    remote_token: Optional[str] = None,
+    instance_id: str = "remote",
+    url: str = "about:blank",
+) -> str:
+    """⭐ Connect to a remote / hosted browser via CDP. No local Chrome
+    is launched. Browser stays running on close — use detach() or
+    browser_close() to release the connection.
+
+    Works with:
+      • Self-hosted Browserless Docker (default http://localhost:3000)
+      • Browserless cloud (https://chrome.browserless.io?token=YOUR_TOKEN)
+      • Any chromium-in-docker with --remote-debugging-port exposed
+      • Generic remote Chrome started with --remote-debugging-port
+
+    Auth: pass `remote_token` for Bearer auth, or append ?token=... to
+    remote_url (Browserless also accepts the token as a query param).
+
+    Args:
+        remote_url: full URL of the remote CDP endpoint, e.g.
+            "http://localhost:3000" or
+            "https://chrome.browserless.io?token=YOUR_TOKEN"
+        remote_token: optional Bearer token (overrides ?token= in URL)
+        instance_id: name for this connection (default "remote")
+        url: initial URL to navigate after connecting (default about:blank)
+
+    Equivalent to browser_launch(remote_url=remote_url, ...) but exposed
+    as a dedicated tool for clarity when the user's whole workflow is
+    remote-only.
+    """
+    if BrowserState.is_up():
+        return err(
+            f"browser already running on instance {BrowserState.current_instance_id!r}. "
+            "Call browser_close() or detach() first."
+        )
+    if instance_id == BrowserState.current_instance_id and BrowserState.instances.get(instance_id):
+        return err(f"instance {instance_id!r} already exists; close it first")
+    ok_flag, msg = await _launch_browser_instance(
+        instance_id=instance_id,
+        url=url,
+        headless=True,  # remote browsers are always headless from our POV
+        proxy=None,
+        user_agent=None,
+        window_width=1280,
+        window_height=800,
+        persistent=True,
+        lang="en-US",
+        extra_args=None,
+        storage_state_path=None,
+        idle_timeout=0,  # never auto-close remote
+        remote_url=remote_url,
+        remote_token=remote_token,
+    )
+    if not ok_flag:
+        return err(msg)
+    return ok(msg)
 
 
 # ══════════════════════════════════════════════════════════════════════════

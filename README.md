@@ -2,7 +2,7 @@
 
 # MCP Stealth Chrome
 
-**133 tools** for AI agents that bypass Cloudflare, Turnstile, reCAPTCHA, and modern anti-bot systems — with an LLM-optimized action kit (`describe_page`, `smart_fill`, `workflow_run`, vision-LLM element locator) layered on top of standard automation.
+**139 tools** for AI agents that bypass Cloudflare, Turnstile, reCAPTCHA, and modern anti-bot systems — with an LLM-optimized action kit (`describe_page`, `smart_fill`, `workflow_run`, vision-LLM element locator) layered on top of standard automation. Now also supports remote/hosted browsers (Browserless, generic CDP).
 
 [![PyPI version](https://img.shields.io/pypi/v/mcp-stealth-chrome.svg)](https://pypi.org/project/mcp-stealth-chrome/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -99,13 +99,101 @@ Claude, gpt-4o, gpt-5.x, Gemini, Groq, local Ollama, any OpenAI-compatible visio
 Method: neutral prompt language bypasses LLM safety filter + auto-refresh challenge
 when vision returns empty + dynamic 3x3/4x4 grid detection + humanized mouse behavior.
 
+## Remote / Hosted Browser (Browserless, generic CDP)
+
+v0.4.13+ supports connecting to a remote browser (self-hosted Docker, Browserless cloud, any chromium-in-docker with `--remote-debugging-port` exposed) instead of launching a local Chrome. No Chrome binary required on the MCP host — the upstream browser does the work, the MCP just speaks CDP.
+
+**Three equivalent entry points:**
+
+```python
+# 1. Dedicated tool — cleanest for remote-only workflows
+connect_remote_browser(remote_url="http://localhost:3000")
+connect_remote_browser(remote_url="https://chrome.browserless.io",
+                       remote_token="CAP-XXXXX")
+
+# 2. Pass to browser_launch (defaults to local mode without these)
+browser_launch(remote_url="http://localhost:3000", url="https://target.com")
+
+# 3. spawn_browser / switch_instance for multi-remote setups
+spawn_browser(instance_id="bl_eu",
+              remote_url="https://production-sfo.browserless.io",
+              remote_token="CAP-EU-XXXXX")
+```
+
+**Globally via env var (no per-call arg needed):**
+```json
+{
+  "mcpServers": {
+    "stealth-chrome": {
+      "command": "uvx",
+      "args": ["mcp-stealth-chrome@latest"],
+      "env": {
+        "REMOTE_BROWSER_URL": "https://chrome.browserless.io?token=CAP-XXXXX"
+      }
+    }
+  }
+}
+```
+With `REMOTE_BROWSER_URL` set, plain `browser_launch()` connects to the remote browser — every other tool works unchanged.
+
+**Self-hosted Browserless Docker:**
+```bash
+docker run -d --name browserless -p 3000:3000 --shm-size=2gb \
+  -e "MAX_CONCURRENT_CONTEXT=20" \
+  -e "CONNECTION_TIMEOUT=60000" \
+  -e "DEFAULT_LAUNCH_ARGS=--no-sandbox" \
+  browserless/chrome:latest
+```
+Then: `browser_launch(remote_url="http://localhost:3000")` — instant, zero setup.
+
+> The `DEFAULT_LAUNCH_ARGS=--no-sandbox` is required because the Browserless
+> container runs as root — without it Chromium refuses to start and the
+> connection fails with `no_sandbox=True` / "running as root" from Playwright.
+> Equivalent fix: append `--no-sandbox` to the docker run command, or use
+> `browserless/chromium` (Puppeteer image) which sets it by default.
+
+**Behavior differences vs local mode:**
+- No local Chrome process to start or stop — `browser_close()` closes only the CDP websocket; the upstream browser keeps running.
+- No profile lock checks, no `~/.mcp-stealth/profile` created.
+- `--window-position`, `--window-size` flags are ignored (remote browser has its own viewport).
+- All 139 tools (CDP, network, cookies, storage, vision, etc.) work identically — only the connection layer is different.
+- `detach()` is the explicit "release without closing" tool (same as before).
+- Browserless runs headless by default — `browser_launch(headless=false)` is ignored; the remote browser controls its own mode.
+
+**Stealth compatibility on remote:**
+
+| Category | Status | Notes |
+|----------|--------|-------|
+| TLS fingerprint spoofing (`http_request` with `impersonate`) | ✅ Full | `curl_cffi` is independent of browser connection — works identically. |
+| `navigator.webdriver` / `Runtime.Enable` CDP leak | ✅ Full | Detection runs inside the remote browser. Browserless Chrome doesn't set automation flags. |
+| No `--enable-automation` flag | ✅ Full | Browserless Chrome doesn't inject automation flags by default. |
+| Behavioral ML bypass (`mouse_drift`, `humanize_click/type`) | ✅ Full | Mouse/keyboard events sent via CDP. Anti-bot ML sees real events. |
+| `storage_state_save/load` (session reuse) | ✅ Full | Cookies + localStorage captured via CDP. Most reliable Turnstile bypass — even better on Browserless. |
+| `solve_captcha` (CapSolver API) | ✅ Full | CAPTCHA solving happens server-side via HTTP API. Browser connection irrelevant. |
+| `detect_anti_bot` / `detect_and_bypass` | ✅ Full | DOM + HTTP header analysis via CDP. Works on remote. |
+| `fingerprint_rotate` (UA/lang/platform/timezone) | ✅ Full | Applied via CDP `Emulation.setDeviceMetricsOverride`. Works on remote. |
+| `verify_cf` / `click_turnstile` (Cloudflare bypass) | ✅ Full | DOM-based detection + CDP click. Works on remote. |
+| `mouse_record` / `mouse_replay` | ⚠️ Partial | `mouse_record` captures via CDP — works. But Browserless is headless, so no human can move the mouse to record. Use a pre-recorded path or `mouse_drift` instead. |
+| `find_by_image` / `click_at_image` (OpenCV template match) | ⚠️ Partial | OpenCV matching works via CDP screenshots. Headless Chrome may render slightly differently, reducing template match accuracy. |
+| `solve_recaptcha_ai` (reCAPTCHA v2 via vision LLM) | ⚠️ Degraded | Screenshot + vision LLM + CDP click all work. But Browserless is headless — reCAPTCHA may detect headless and serve harder challenges or block outright. Local mode with `headless=false` has higher success rates. |
+| `vision_locate` (NL → element coordinates) | ⚠️ Degraded | Same as `solve_recaptcha_ai` — headless mode may affect element rendering. |
+| `clone_chrome_profile` (reuse existing Chrome session) | ❌ No | Copies local `~/.mcp-stealth/profile/` or user Chrome profile. Browserless has its own profile. Use `storage_state_save/load` instead. |
+| `list_chrome_profiles` (enumerate local Chrome profiles) | ❌ No | Local-only utility. Browserless has no concept of user Chrome profiles. |
+| `browser_launch(headless=false)` for hard targets | ❌ No | Remote Browserless always runs headless. The README recommends `headless=false` for hard anti-bot targets — not available in remote mode. |
+
+**Failure modes handled:**
+- Wrong port / unreachable → clear error from CDP probe
+- Wrong/missing token on cloud → 401/403 with "set remote_token" hint
+- Bad URL scheme (not http/https) → ValueError before any network call
+- Connect timeout → capped at `BROWSER_LAUNCH_TIMEOUT` (45s default)
+
 ## Key Differentiators
 
 Compared to the leading Python stealth MCP ([vibheksoni/stealth-browser-mcp](https://github.com/vibheksoni/stealth-browser-mcp), 476⭐):
 
 | Feature | mcp-stealth-chrome | vibheksoni |
 |---------|:-------------------:|:-----------:|
-| Tools | **133** | 90 |
+| Tools | **139** | 90 |
 | LLM-optimized kit (describe_page, smart_fill, vision_locate, workflow_run, assert_*) | ✅ **Unique** | ❌ |
 | Network body capture + session-bridged HTTP | ✅ **Unique** | ❌ |
 | `click_turnstile` one-liner | ✅ Embed widgets + template fallback | ❌ |
@@ -263,7 +351,7 @@ Settings → Extensions → MCP Servers, or edit `~/.config/zed/settings.json`:
 
 ## 🔑 BYOK (Bring Your Own Key) — Optional
 
-`mcp-stealth-chrome` is **fully functional without any API key** — 130 of 133 tools work out of the box, including `click_turnstile` (Cloudflare Turnstile bypass), TLS-perfect HTTP, multi-instance, DevTools-level perf/coverage/emulation, the full LLM-optimized kit (`describe_page` / `smart_fill` / `workflow_run`), and all scraping tools.
+`mcp-stealth-chrome` is **fully functional without any API key** — 136 of 139 tools work out of the box, including `click_turnstile` (Cloudflare Turnstile bypass), TLS-perfect HTTP, multi-instance, DevTools-level perf/coverage/emulation, the full LLM-optimized kit (`describe_page` / `smart_fill` / `workflow_run`), and all scraping tools.
 
 **API keys are optional — only needed for 3 vision/solver tools:**
 
@@ -274,6 +362,8 @@ Settings → Extensions → MCP Servers, or edit `~/.config/zed/settings.json`:
 | `solve_captcha` | **Turnstile, reCAPTCHA v2, reCAPTCHA v3, hCaptcha** via paid solver | CapSolver API | ~$0.80-1.00 per 1000 |
 
 Everything else (click_turnstile, verify_cf, storage_state, http_request, detect_anti_bot, clone_chrome_profile, etc.) works 100% **without any key**.
+
+> **Remote mode note:** `solve_recaptcha_ai` and `vision_locate` work on remote browsers but are degraded — Browserless runs headless, so reCAPTCHA may detect headless and serve harder challenges. For highest success rates, use local mode with `headless=false`. `solve_captcha` (CapSolver) is unaffected by headless mode since it uses a paid solver service.
 
 ### When BYOK Matters
 
@@ -401,7 +491,7 @@ Legacy `AI_VISION_*` env still work but emit `DeprecationWarning`. Migrate to `O
 - `uv` installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Chrome or Chromium browser (auto-detected by nodriver)
 
-## Tool Categories (133)
+## Tool Categories (139)
 
 ### ⭐⭐⭐ Dual-Mode HTTP (unique)
 | Tool | Purpose |
@@ -417,15 +507,15 @@ Legacy `AI_VISION_*` env still work but emit `DeprecationWarning`. Migrate to `O
 | `click_turnstile` | CF Turnstile bypass for embed widgets + template-match fallback |
 | `click_element_offset` | Click at % position inside element (not center) |
 | `click_at_corner` | Click top-left/right/bottom-left/right of element |
-| `find_by_image` | OpenCV template match → coordinates |
-| `click_at_image` | Find image + click its center |
+| `find_by_image` | OpenCV template match → coordinates (⚠️ remote: headless rendering may reduce accuracy) |
+| `click_at_image` | Find image + click its center (⚠️ remote: headless rendering may reduce accuracy) |
 | `mouse_drift` | Random Bezier wandering (pass behavioral ML) |
-| `mouse_record` / `mouse_replay` | Capture real human mouse patterns, replay |
+| `mouse_record` / `mouse_replay` | Capture real human mouse patterns, replay (⚠️ remote: `mouse_record` needs a headed browser — use pre-recorded path or `mouse_drift` instead) |
 
 ### ⭐⭐ AI Vision Solver (unique)
 | Tool | Purpose |
 |------|---------|
-| `solve_recaptcha_ai` | Vision LLM picks matching tiles — solve image challenges (auto-clicks anchor checkbox in v0.2.10+) |
+| `solve_recaptcha_ai` | Vision LLM picks matching tiles — solve image challenges (⚠️ remote: headless mode may trigger harder reCAPTCHA challenges; local `headless=false` has higher success rates) |
 | `vision_locate` | NL → element coordinates: `"the red Create button at bottom right"` (optional `click=True`) |
 
 ### ⭐⭐⭐ AI-Agent Action Kit (LLM-optimized, new in v0.3.0)
@@ -455,6 +545,8 @@ Network capture with response bodies, plus a bridge from browser session into TL
 | `dialog_auto_handle` | Persistent native-dialog handler with type filter (alert / confirm / prompt / beforeunload). Update action without re-arming. Idempotent per tab |
 
 ### ⭐ Stealth Toolkit
+All tools work identically on remote browsers. Session-based tools (`storage_state_save/load`) are the most reliable Turnstile bypass on Browserless.
+
 | Tool | Purpose |
 |------|---------|
 | `storage_state_save` / `storage_state_load` | Portable session export — bypass Turnstile via reuse |
@@ -466,7 +558,7 @@ Network capture with response bodies, plus a bridge from browser session into TL
 ### Multi-Instance
 | Tool | Purpose |
 |------|---------|
-| `spawn_browser` | New named instance (parallel profiles) |
+| `spawn_browser` | New named instance (parallel profiles; supports `remote_url` for remote instances) |
 | `list_instances` / `switch_instance` | Manage multiple browsers |
 | `close_instance` / `close_all_instances` | Clean shutdown |
 
@@ -518,7 +610,7 @@ Network capture with response bodies, plus a bridge from browser session into TL
 | Console/Network: 4 | console_start/get, network_start/get |
 | Debug: 3 | server_status, get_page_errors, export_har |
 | Scraping: 4 | detect_content_pattern, extract_structured, extract_table, scrape_page |
-| Chrome profile integration: 2 | list_chrome_profiles, clone_chrome_profile |
+| Chrome profile integration: 2 | list_chrome_profiles, clone_chrome_profile (local-only — use `storage_state_save/load` for remote) |
 
 ## Example Workflows
 
@@ -627,6 +719,8 @@ Data locations:
 |----------|---------|---------|
 | `BROWSER_IDLE_TIMEOUT` | `600` | Auto-close browsers after idle seconds (0 = never) |
 | `BROWSER_IDLE_REAPER_INTERVAL` | `60` | How often reaper checks idle state |
+| `REMOTE_BROWSER_URL` | — | Default to remote mode: e.g. `http://localhost:3000` (self-hosted Browserless Docker) or `https://chrome.browserless.io?token=YOUR_TOKEN` (cloud) |
+| `REMOTE_BROWSER_TOKEN` | — | Bearer token for `REMOTE_BROWSER_URL` when not embedded in the URL |
 | `CAPSOLVER_KEY` | — | Enable `solve_captcha` tool |
 | `OPENAI_API_KEY` | — | OpenAI-compat `solve_recaptcha_ai` (standard) |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Custom endpoint (Groq, Together, Ollama, etc.) |
@@ -664,6 +758,31 @@ Bypass layer vs detection:
 - ChatGPT managed Turnstile (checks React internal state)
 
 For these, `storage_state_save/load` (manual-login-once, reuse) is the most reliable OSS approach.
+
+### Remote Mode Compatibility
+
+When using remote/hosted browsers (Browserless, generic CDP), the stealth compatibility changes:
+
+**Fully working (no degradation):**
+- TLS fingerprint spoofing (`curl_cffi` is independent of browser connection)
+- `navigator.webdriver` / `Runtime.Enable` / automation flags (Browserless Chrome doesn't set them)
+- Behavioral ML bypass (`mouse_drift`, `humanize_click/type` — events sent via CDP)
+- `storage_state_save/load` (session reuse — most reliable Turnstile bypass)
+- `solve_captcha` (CapSolver API — server-side, browser-irrelevant)
+- `detect_anti_bot` / `detect_and_bypass` (DOM + HTTP header analysis)
+- `fingerprint_rotate` (UA/lang/platform/timezone via CDP)
+- `verify_cf` / `click_turnstile` (DOM-based detection + CDP click)
+
+**Degraded (headless mode affects success rates):**
+- `solve_recaptcha_ai` — reCAPTCHA may detect headless and serve harder challenges. Local mode with `headless=false` has higher success rates.
+- `vision_locate` — headless mode may affect element rendering.
+- `find_by_image` / `click_at_image` — headless Chrome may render slightly differently, reducing OpenCV template match accuracy.
+- `mouse_record` — Browserless is headless, so no human can move the mouse to record. Use a pre-recorded path or `mouse_drift` instead.
+
+**Not available on remote:**
+- `clone_chrome_profile` / `list_chrome_profiles` — local-only. Use `storage_state_save/load` instead.
+- `browser_launch(headless=false)` — Browserless always runs headless.
+- `testing_mode=True` — local-only optimization.
 
 ## Sister Package
 

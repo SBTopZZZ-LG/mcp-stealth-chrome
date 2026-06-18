@@ -98,10 +98,62 @@ def test_snapshot_js_intact():
     print(f"  9 JS templates intact")
 
 
+def test_remote_target_parser():
+    """_parse_remote_target handles self-hosted, cloud, with/without tokens,
+    bad schemes. Catches regressions in the Browserless / generic-CDP attach path."""
+    from mcp_stealth_chrome.server import _parse_remote_target
+
+    # self-hosted
+    t = _parse_remote_target("http://localhost:3000")
+    assert (t.host, t.port, t.scheme) == ("localhost", 3000, "http"), t
+
+    # LAN with port
+    t = _parse_remote_target("http://192.168.1.10:9222")
+    assert (t.host, t.port) == ("192.168.1.10", 9222), t
+
+    # cloud with ?token= in URL
+    t = _parse_remote_target("https://chrome.browserless.io?token=CAP-XXX")
+    assert t.scheme == "https" and t.port == 443 and t.token == "CAP-XXX", t
+
+    # explicit token overrides query
+    t = _parse_remote_target("https://chrome.browserless.io?token=OLD", remote_token="NEW")
+    assert t.token == "NEW", t
+
+    # regional cloud (no token)
+    t = _parse_remote_target("https://production-sfo.browserless.io")
+    assert t.scheme == "https" and t.port == 443 and t.token is None, t
+
+    # bad scheme
+    try:
+        _parse_remote_target("ftp://nope")
+        raise AssertionError("ftp:// should have raised ValueError")
+    except ValueError:
+        pass
+    print(f"  remote target parser: 6 cases OK")
+
+
+def test_remote_connect_failure_path():
+    """_connect_remote to a dead port must return (None, info, error)
+    with an actionable message — not raise."""
+    import asyncio
+    from mcp_stealth_chrome.server import _connect_remote, _RemoteTarget
+
+    async def go():
+        t = _RemoteTarget(host="127.0.0.1", port=1, scheme="http")
+        browser, info, error = await _connect_remote(t, "test", timeout=3.0)
+        assert browser is None, f"expected None browser, got {browser!r}"
+        assert error, f"expected non-empty error, got {error!r}"
+        assert "/json/version" in error or "probe" in error.lower() or "connect" in error.lower(), \
+            f"error should mention the probe: {error!r}"
+    asyncio.run(go())
+    print(f"  remote connect failure path: error message OK")
+
+
 if __name__ == "__main__":
     for fn in (test_cookie_parser, test_helpers_module_state,
                 test_workflow_dispatch_table, test_vision_provider_resolve,
-                test_snapshot_js_intact):
+                test_snapshot_js_intact,
+                test_remote_target_parser, test_remote_connect_failure_path):
         print(f"\n{fn.__name__}:")
         try:
             fn()
