@@ -138,12 +138,19 @@ With `REMOTE_BROWSER_URL` set, plain `browser_launch()` connects to the remote b
 
 **Self-hosted Browserless Docker:**
 ```bash
-docker run -d --name browserless -p 3000:3000 \
+docker run -d --name browserless -p 3000:3000 --shm-size=2gb \
   -e "MAX_CONCURRENT_CONTEXT=20" \
   -e "CONNECTION_TIMEOUT=60000" \
+  -e "DEFAULT_LAUNCH_ARGS=--no-sandbox" \
   browserless/chrome:latest
 ```
 Then: `browser_launch(remote_url="http://localhost:3000")` — instant, zero setup.
+
+> The `DEFAULT_LAUNCH_ARGS=--no-sandbox` is required because the Browserless
+> container runs as root — without it Chromium refuses to start and the
+> connection fails with `no_sandbox=True` / "running as root" from Playwright.
+> Equivalent fix: append `--no-sandbox` to the docker run command, or use
+> `browserless/chromium` (Puppeteer image) which sets it by default.
 
 **Behavior differences vs local mode:**
 - No local Chrome process to start or stop — `browser_close()` closes only the CDP websocket; the upstream browser keeps running.

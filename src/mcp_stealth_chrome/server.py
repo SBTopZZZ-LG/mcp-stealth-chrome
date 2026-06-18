@@ -4115,6 +4115,10 @@ async def _launch_remote_instance(
         )
         BrowserState.instances[instance_id] = snap
         _ATTACHED_BROWSERS.add(instance_id)
+        _set_active_browser(browser, instance_id, attached=True, profile_dir=None,
+                            idle_timeout=idle_timeout)
+        BrowserState.tabs = list(browser.tabs)
+        BrowserState.active_tab_index = 0
 
     _ensure_idle_reaper_running()
     browser_label = info.get("Browser") or target.host
@@ -6273,6 +6277,56 @@ async def form_introspect(form_selector: Optional[str] = None) -> str:
 _ATTACHED_BROWSERS: set[str] = set()
 
 
+def _patch_nodriver_http_user_agent() -> None:
+    """Browserless (and some other hosted Chrome endpoints) reject
+    `urllib.request`'s default `User-Agent: Python-urllib/3.11` with HTTP 400
+    on `/json/version` and `/json/list`. nodriver's `HTTPApi._request` uses
+    `urllib.request` with no custom UA, so its `start()` probe always fails
+    on those endpoints and surfaces the misleading "running as root /
+    no_sandbox=True" error from `Browser.start`.
+
+    Patch once at import time so every nodriver start (local or remote) sends
+    a real browser UA. Safe for localhost Chrome too — it just looks like a
+    regular browser probe.
+    """
+    try:
+        from nodriver.core.browser import HTTPApi
+    except Exception:
+        return  # nodriver not installed; nothing to patch
+    if getattr(HTTPApi, "_mcp_stealth_ua_patched", False):
+        return
+    import json as _json
+    import urllib.parse as _up
+    import urllib.request as _ur
+
+    async def _patched_request(self, endpoint, method: str = "get", data: dict = None):
+        url = _up.urljoin(
+            self.api, f"json/{endpoint}" if endpoint else "/json"
+        )
+        if not url:
+            url = self.api + endpoint
+        request = _ur.Request(url)
+        request.add_header(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) HeadlessChrome/121.0.6167.57 Safari/537.36",
+        )
+        request.method = method.upper()
+        request.data = None
+        if data:
+            request.data = _json.dumps(data).encode("utf-8")
+        response = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _ur.urlopen(request, timeout=10)
+        )
+        return _json.loads(response.read())
+
+    HTTPApi._request = _patched_request  # type: ignore[assignment]
+    HTTPApi._mcp_stealth_ua_patched = True  # type: ignore[attr-defined]
+
+
+_patch_nodriver_http_user_agent()
+
+
 @dataclass
 class _RemoteTarget:
     """Parsed remote browser endpoint. Used by both `attach_to_chrome` and
@@ -6374,7 +6428,21 @@ async def _connect_remote(
     except asyncio.TimeoutError:
         return None, info, f"remote connect timed out after {timeout}s — {target.base_url}"
     except Exception as e:
-        return None, info, f"remote connect failed: {e}"
+        msg = f"remote connect failed: {e}"
+        if "no_sandbox" in str(e) or "running as root" in str(e) or "sandbox" in str(e).lower():
+            msg += (
+                " | Hint: the remote Chromium is running as root inside its container. "
+                "Restart it with --no-sandbox, e.g. for Browserless Docker add "
+                "`-e DEFAULT_LAUNCH_ARGS='--no-sandbox'` or pass `--no-sandbox` after the image name: "
+                "`docker run ... browserless/chrome:latest --no-sandbox`."
+            )
+        elif "400" in str(e) or "Bad Request" in str(e):
+            msg += (
+                " | Hint: the remote endpoint rejected the request. "
+                "Verify the URL is correct and the server is running. "
+                "If using Browserless, ensure it is started with `--no-sandbox`."
+            )
+        return None, info, msg
     return browser, info, None
 
 
