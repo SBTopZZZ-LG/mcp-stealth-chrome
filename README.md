@@ -127,6 +127,7 @@ spawn_browser(instance_id="bl_eu",
 ```
 
 **Globally via env var (no per-call arg needed):**
+
 ```json
 {
   "mcpServers": {
@@ -140,9 +141,11 @@ spawn_browser(instance_id="bl_eu",
   }
 }
 ```
+
 With `REMOTE_BROWSER_URL` set, plain `browser_launch()` connects to the remote browser — every other tool works unchanged.
 
 **Self-hosted Browserless Docker:**
+
 ```bash
 docker run -d --name browserless -p 3000:3000 --shm-size=2gb \
   -e "MAX_CONCURRENT_CONTEXT=20" \
@@ -150,6 +153,7 @@ docker run -d --name browserless -p 3000:3000 --shm-size=2gb \
   -e "DEFAULT_LAUNCH_ARGS=--no-sandbox" \
   browserless/chrome:latest
 ```
+
 Then: `browser_launch(remote_url="http://localhost:3000")` — instant, zero setup.
 
 > The `DEFAULT_LAUNCH_ARGS=--no-sandbox` is required because the Browserless
@@ -159,6 +163,7 @@ Then: `browser_launch(remote_url="http://localhost:3000")` — instant, zero set
 > `browserless/chromium` (Puppeteer image) which sets it by default.
 
 **Behavior differences vs local mode:**
+
 - No local Chrome process to start or stop — `browser_close()` closes only the CDP websocket; the upstream browser keeps running.
 - No profile lock checks, no `~/.mcp-stealth/profile` created.
 - `--window-position`, `--window-size` flags are ignored (remote browser has its own viewport).
@@ -188,6 +193,7 @@ Then: `browser_launch(remote_url="http://localhost:3000")` — instant, zero set
 | `browser_launch(headless=false)` for hard targets | ❌ No | Remote Browserless always runs headless. The README recommends `headless=false` for hard anti-bot targets — not available in remote mode. |
 
 **Failure modes handled:**
+
 - Wrong port / unreachable → clear error from CDP probe
 - Wrong/missing token on cloud → 401/403 with "set remote_token" hint
 - Bad URL scheme (not http/https) → ValueError before any network call
@@ -217,6 +223,7 @@ Compared to the leading Python stealth MCP ([vibheksoni/stealth-browser-mcp](htt
 ## Quick Install (3 commands per OS)
 
 **macOS:**
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh        # install uv
 brew install --cask google-chrome                       # install Chrome (skip if already installed)
@@ -224,6 +231,7 @@ claude mcp add stealth-chrome --scope user -- uvx mcp-stealth-chrome@latest
 ```
 
 **Linux (Ubuntu/Debian):**
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 sudo apt install -y google-chrome-stable                # or chromium-browser
@@ -231,6 +239,7 @@ claude mcp add stealth-chrome --scope user -- uvx mcp-stealth-chrome@latest
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 winget install Google.Chrome
@@ -245,20 +254,24 @@ See [INSTALL.md](INSTALL.md) for detailed per-client setup + troubleshooting. Pe
 <summary><b>Claude Code</b></summary>
 
 **Global** (available in all projects):
+
 ```bash
 claude mcp add stealth-chrome --scope user -- uvx mcp-stealth-chrome@latest
 ```
 
 **Project only** (current project):
+
 ```bash
 claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
 ```
+
 </details>
 
 <details>
 <summary><b>Claude Desktop</b></summary>
 
 **Global** — add to config file:
+
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 - **Linux:** `~/.config/Claude/claude_desktop_config.json`
@@ -294,6 +307,7 @@ claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
   }
 }
 ```
+
 </details>
 
 <details>
@@ -313,6 +327,7 @@ claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
   }
 }
 ```
+
 </details>
 
 <details>
@@ -332,6 +347,7 @@ claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
   }
 }
 ```
+
 </details>
 
 <details>
@@ -351,6 +367,7 @@ Settings → Extensions → MCP Servers, or edit `~/.config/zed/settings.json`:
   }
 }
 ```
+
 </details>
 
 ---
@@ -383,6 +400,7 @@ You can use **either one or both** depending on your budget and reliability need
 `solve_recaptcha_ai` sends a screenshot + text prompt to the model — text-only models will fail silently.
 
 ✅ **Vision-capable (supported):**
+
 - **OpenAI**: `gpt-4o`, `gpt-4o-mini`, `gpt-4-vision-preview`, `gpt-5.x`
 - **Anthropic**: `claude-opus-4-7`, `claude-sonnet-4-*`
 - **Local Ollama**: `llava`, `llava-llama3`, `bakllava`, `llama3.2-vision`
@@ -390,6 +408,7 @@ You can use **either one or both** depending on your budget and reliability need
 - **Custom**: any model documented as "multimodal" / "vision"
 
 ❌ **Text-only (NOT supported):**
+
 - `gpt-3.5-turbo`, `llama3` (non-vision variant), `claude-3-haiku` (limited)
 
 #### Config Options
@@ -443,6 +462,7 @@ Uses OpenAI SDK standard env names (`OPENAI_API_KEY`, `OPENAI_BASE_URL`).
 Works with any provider exposing `/v1/chat/completions` with `image_url` content support.
 
 **Example — Groq:**
+
 ```json
 "env": {
   "OPENAI_BASE_URL": "https://api.groq.com/openai/v1",
@@ -450,6 +470,7 @@ Works with any provider exposing `/v1/chat/completions` with `image_url` content
   "OPENAI_MODEL":    "llama-3.2-90b-vision-preview"
 }
 ```
+
 </details>
 
 <details>
@@ -500,6 +521,7 @@ Legacy `AI_VISION_*` env still work but emit `DeprecationWarning`. Migrate to `O
 ## Tool Categories (139)
 
 ### ⭐⭐⭐ Dual-Mode HTTP (unique)
+
 | Tool | Purpose |
 |------|---------|
 | `http_request` | TLS-perfect HTTP via curl_cffi (chrome/firefox/safari impersonation) |
@@ -508,6 +530,7 @@ Legacy `AI_VISION_*` env still work but emit `DeprecationWarning`. Migrate to `O
 | `detect_anti_bot` | Identify CF/DataDome/PerimeterX/Kasada/Imperva on current page |
 
 ### ⭐⭐ Precision Mouse Kit (unique)
+
 | Tool | Purpose |
 |------|---------|
 | `click_turnstile` | CF Turnstile bypass for embed widgets + template-match fallback |
@@ -519,12 +542,14 @@ Legacy `AI_VISION_*` env still work but emit `DeprecationWarning`. Migrate to `O
 | `mouse_record` / `mouse_replay` | Capture real human mouse patterns, replay (⚠️ remote: `mouse_record` needs a headed browser — use pre-recorded path or `mouse_drift` instead) |
 
 ### ⭐⭐ AI Vision Solver (unique)
+
 | Tool | Purpose |
 |------|---------|
 | `solve_recaptcha_ai` | Vision LLM picks matching tiles — solve image challenges (⚠️ remote: headless mode may trigger harder reCAPTCHA challenges; local `headless=false` has higher success rates) |
 | `vision_locate` | NL → element coordinates: `"the red Create button at bottom right"` (optional `click=True`) |
 
 ### ⭐⭐⭐ AI-Agent Action Kit (LLM-optimized, new in v0.3.0)
+
 Designed for LLM-driven workflows — token-efficient page summaries, label-fuzzy form filling, verification primitives, resumable orchestration.
 
 | Tool | Purpose |
@@ -540,6 +565,7 @@ Designed for LLM-driven workflows — token-efficient page summaries, label-fuzz
 | `detect_and_bypass` | One-shot: detect anti-bot wall (CF / DataDome / PX / Akamai / Imperva / Kasada) and apply best bypass we have |
 
 ### ⭐⭐ Network + Auth Bridge (new in v0.4.0)
+
 Network capture with response bodies, plus a bridge from browser session into TLS-perfect HTTP for authenticated API debugging.
 
 | Tool | Purpose |
@@ -551,6 +577,7 @@ Network capture with response bodies, plus a bridge from browser session into TL
 | `dialog_auto_handle` | Persistent native-dialog handler with type filter (alert / confirm / prompt / beforeunload). Update action without re-arming. Idempotent per tab |
 
 ### ⭐ Stealth Toolkit
+
 All tools work identically on remote browsers. Session-based tools (`storage_state_save/load`) are the most reliable Turnstile bypass on Browserless.
 
 | Tool | Purpose |
@@ -562,6 +589,7 @@ All tools work identically on remote browsers. Session-based tools (`storage_sta
 | `humanize_click` / `humanize_type` | Bezier+Gaussian for single actions |
 
 ### Multi-Instance
+
 | Tool | Purpose |
 |------|---------|
 | `spawn_browser` | New named instance (parallel profiles; supports `remote_url` for remote instances) |
@@ -569,6 +597,7 @@ All tools work identically on remote browsers. Session-based tools (`storage_sta
 | `close_instance` / `close_all_instances` | Clean shutdown |
 
 ### ⭐⭐ DevTools Suite — perf, coverage, emulation (new in v0.2.0)
+
 | Tool | Purpose |
 |------|---------|
 | `performance_trace_start` / `performance_trace_stop` | CDP Tracing — save .json, drop into chrome://tracing or DevTools Performance panel |
@@ -584,6 +613,7 @@ All tools work identically on remote browsers. Session-based tools (`storage_sta
 | `console_clear` | Reset captured console buffer |
 
 ### ⚡ Performance optimizations
+
 | Feature | What it does |
 |---------|--------------|
 | `browser_snapshot(mode="fast")` | Skip getComputedStyle + minimal attrs (2–3× faster) |
@@ -594,6 +624,7 @@ All tools work identically on remote browsers. Session-based tools (`storage_sta
 | `browser_launch(testing_mode=True)` | Disable images / background throttling / translate — 2–5× faster nav for perf tests (not for stealth) |
 
 ### Standard Browser Automation (lifecycle/navigation/DOM/interaction/scraping)
+
 | Count | Examples |
 |-------|----------|
 | Lifecycle: 2 | browser_launch, browser_close |
@@ -713,6 +744,7 @@ uvx mcp-stealth-chrome → Python 3.11 → FastMCP → nodriver → Chrome/Chrom
 ```
 
 Data locations:
+
 - Profile (main): `~/.mcp-stealth/profile/`
 - Profiles (multi-instance): `~/.mcp-stealth/profiles/<instance_id>/`
 - Screenshots: `~/.mcp-stealth/screenshots/`
@@ -740,6 +772,7 @@ Data locations:
 ## Stealth Details
 
 Underlying tech stack:
+
 - **nodriver** — Python CDP client with no WebDriver/Runtime.Enable leaks
 - **curl_cffi** — libcurl with CFFI, matches Chrome/Firefox/Safari TLS handshake exactly (JA3/JA4 authenticity)
 - **OpenCV** — template matching for visual CAPTCHA checkbox detection
@@ -758,6 +791,7 @@ Bypass layer vs detection:
 | Behavioral ML | `mouse_drift`, `mouse_record/replay`, `humanize_click/type` |
 
 **Honest limits** — these are HARDEST OSS bypass targets and require commercial services for production:
+
 - DataDome (real-time behavioral ML across 50+ signals)
 - Kasada (proprietary JS, rotates daily)
 - PerimeterX/HUMAN (ML-based request scoring)
@@ -770,6 +804,7 @@ For these, `storage_state_save/load` (manual-login-once, reuse) is the most reli
 When using remote/hosted browsers (Browserless, generic CDP), the stealth compatibility changes:
 
 **Fully working (no degradation):**
+
 - TLS fingerprint spoofing (`curl_cffi` is independent of browser connection)
 - `navigator.webdriver` / `Runtime.Enable` / automation flags (Browserless Chrome doesn't set them)
 - Behavioral ML bypass (`mouse_drift`, `humanize_click/type` — events sent via CDP)
@@ -780,12 +815,14 @@ When using remote/hosted browsers (Browserless, generic CDP), the stealth compat
 - `verify_cf` / `click_turnstile` (DOM-based detection + CDP click)
 
 **Degraded (headless mode affects success rates):**
+
 - `solve_recaptcha_ai` — reCAPTCHA may detect headless and serve harder challenges. Local mode with `headless=false` has higher success rates.
 - `vision_locate` — headless mode may affect element rendering.
 - `find_by_image` / `click_at_image` — headless Chrome may render slightly differently, reducing OpenCV template match accuracy.
 - `mouse_record` — Browserless is headless, so no human can move the mouse to record. Use a pre-recorded path or `mouse_drift` instead.
 
 **Not available on remote:**
+
 - `clone_chrome_profile` / `list_chrome_profiles` — local-only. Use `storage_state_save/load` instead.
 - `browser_launch(headless=false)` — Browserless always runs headless.
 - `testing_mode=True` — local-only optimization.
@@ -793,6 +830,7 @@ When using remote/hosted browsers (Browserless, generic CDP), the stealth compat
 ## Sister Package
 
 [mcp-camoufox](https://github.com/SBTopZZZ-LG/mcp-camoufox) — Firefox stealth with same API. Use when you need:
+
 - Hardest anti-bot bypass (Camoufox C++ level patches = stealth score 6% CreepJS)
 - Firefox-specific rendering
 - Node.js ecosystem
@@ -809,6 +847,7 @@ uv run mcp-stealth-chrome       # run stdio server locally
 ```
 
 Testing:
+
 ```bash
 uv run python /tmp/smoke-test.py      # full smoke test (see /tmp/ examples)
 ```
