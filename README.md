@@ -22,6 +22,12 @@ One-line install with `uvx`:
 claude mcp add stealth-chrome -- uvx mcp-stealth-chrome@latest
 ```
 
+To use the MCP from this forked repository (with remote browser support and other latest changes):
+
+```bash
+claude mcp add stealth-chrome -- uvx --from git+https://github.com/SBTopZZZ-LG/mcp-stealth-chrome@main mcp-stealth-chrome
+```
+
 ## Proven on Real Sites
 
 | Site | Challenge | Result |
