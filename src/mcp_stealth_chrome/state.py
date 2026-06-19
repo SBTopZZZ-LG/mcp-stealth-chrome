@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import Callable, ClassVar, Optional
 
 from nodriver import Browser, Tab
 
@@ -450,6 +450,8 @@ class InstanceSnapshot:
     page_errors: list[str] = field(default_factory=list)
     capture_console: bool = False
     capture_network: bool = False
+    remote_url: Optional[str] = None
+    remote_token: Optional[str] = None
 
     def touch(self) -> None:
         self.last_active = time.time()
@@ -493,6 +495,16 @@ class BrowserState:
     current_idle_timeout: ClassVar[int] = DEFAULT_IDLE_TIMEOUT
     current_last_active: ClassVar[float] = time.time()
     current_created_at: ClassVar[float] = time.time()
+
+    # Remote connection metadata — stored so auto-reconnect can re-connect
+    # after a stale CDP websocket without requiring the user to re-enter
+    # remote_url / remote_token.
+    current_remote_url: ClassVar[Optional[str]] = None
+    current_remote_token: ClassVar[Optional[str]] = None
+
+    # Callback set by server.py to perform the actual reconnection.
+    # Signature: async (remote_url, remote_token) -> Optional[Browser]
+    reconnect_callback: ClassVar[Optional[Callable]] = None
 
     # Last mouse position — enables realistic cursor continuation (no teleports).
     # Updated by tools that move the mouse.
@@ -551,6 +563,38 @@ class BrowserState:
         return cls.tabs[cls.active_tab_index]
 
     @classmethod
+    async def active_tab_with_reconnect(cls) -> Tab:
+        """Like active_tab(), but attempts auto-reconnect for remote/attached
+        instances when the CDP websocket is stale.
+
+        Returns the active Tab after successful reconnect (or original if alive).
+        Raises RuntimeError if reconnect fails or no reconnect info is available.
+        """
+        if cls.browser is not None and not cls._browser_alive():
+            if cls.current_remote_url and cls.reconnect_callback:
+                new_browser = await cls.reconnect_callback(
+                    cls.current_remote_url, cls.current_remote_token,
+                )
+                if new_browser is not None:
+                    cls.browser = new_browser
+                    cls.tabs = list(new_browser.tabs)
+                    cls.active_tab_index = 0
+                    cls.current_last_active = time.time()
+                    if cls.tabs:
+                        return cls.tabs[cls.active_tab_index]
+            cls.reset()
+            raise RuntimeError(
+                "Browser died (Chrome closed or CDP websocket lost). State auto-reset — "
+                "call browser_launch to start a fresh session."
+            )
+        if not cls.is_up():
+            raise RuntimeError("Browser not running. Call browser_launch first.")
+        cls.current_last_active = time.time()
+        if cls.active_tab_index >= len(cls.tabs):
+            cls.active_tab_index = 0
+        return cls.tabs[cls.active_tab_index]
+
+    @classmethod
     def reset(cls) -> None:
         """Reset ONLY current instance (legacy behavior)."""
         cls.browser = None
@@ -562,6 +606,8 @@ class BrowserState:
         cls.page_errors = []
         cls.capture_console = False
         cls.capture_network = False
+        cls.current_remote_url = None
+        cls.current_remote_token = None
 
     # ── Multi-instance API ─────────────────────────────────────────────────
 
@@ -583,6 +629,8 @@ class BrowserState:
             page_errors=list(cls.page_errors),
             capture_console=cls.capture_console,
             capture_network=cls.capture_network,
+            remote_url=cls.current_remote_url,
+            remote_token=cls.current_remote_token,
         )
 
     @classmethod
@@ -602,6 +650,8 @@ class BrowserState:
         cls.page_errors = list(snap.page_errors)
         cls.capture_console = snap.capture_console
         cls.capture_network = snap.capture_network
+        cls.current_remote_url = snap.remote_url
+        cls.current_remote_token = snap.remote_token
 
     @classmethod
     def switch_to(cls, instance_id: str) -> InstanceSnapshot:

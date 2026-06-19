@@ -149,11 +149,63 @@ def test_remote_connect_failure_path():
     print(f"  remote connect failure path: error message OK")
 
 
+def test_auto_reconnect_fields():
+    """Verify BrowserState stores remote_url/remote_token and reconnect_callback."""
+    import asyncio
+    from mcp_stealth_chrome.state import BrowserState, InstanceSnapshot
+
+    # InstanceSnapshot has remote fields
+    snap = InstanceSnapshot(
+        instance_id="test",
+        remote_url="http://localhost:3000",
+        remote_token="tok123",
+    )
+    assert snap.remote_url == "http://localhost:3000"
+    assert snap.remote_token == "tok123"
+
+    # BrowserState has remote fields
+    assert hasattr(BrowserState, "current_remote_url")
+    assert hasattr(BrowserState, "current_remote_token")
+    assert hasattr(BrowserState, "reconnect_callback")
+
+    # reset() clears remote fields
+    BrowserState.current_remote_url = "http://test"
+    BrowserState.current_remote_token = "tok"
+    BrowserState.reset()
+    assert BrowserState.current_remote_url is None
+    assert BrowserState.current_remote_token is None
+
+    # snapshot/restore preserves remote fields
+    BrowserState.current_remote_url = "http://test2"
+    BrowserState.current_remote_token = "tok2"
+    snap = BrowserState.snapshot_current()
+    assert snap.remote_url == "http://test2"
+    assert snap.remote_token == "tok2"
+    BrowserState.reset()
+    BrowserState.restore_from(snap)
+    assert BrowserState.current_remote_url == "http://test2"
+    assert BrowserState.current_remote_token == "tok2"
+
+    # Clean up
+    BrowserState.reset()
+    print("  auto-reconnect fields: OK")
+
+
+def test_keepalive_ping_exists():
+    """Verify _keepalive_ping is importable and callable."""
+    from mcp_stealth_chrome.server import _keepalive_ping
+    import asyncio
+    # Should not raise even with no browser running
+    asyncio.run(_keepalive_ping())
+    print("  keepalive ping: OK")
+
+
 if __name__ == "__main__":
     for fn in (test_cookie_parser, test_helpers_module_state,
                 test_workflow_dispatch_table, test_vision_provider_resolve,
                 test_snapshot_js_intact,
-                test_remote_target_parser, test_remote_connect_failure_path):
+                test_remote_target_parser, test_remote_connect_failure_path,
+                test_auto_reconnect_fields, test_keepalive_ping_exists):
         print(f"\n{fn.__name__}:")
         try:
             fn()

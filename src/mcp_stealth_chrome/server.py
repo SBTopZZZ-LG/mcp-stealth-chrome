@@ -3486,6 +3486,9 @@ async def solve_captcha(
         "hcaptcha": "HCaptchaTaskProxyLess",
     }
     meta = {"action": action} if action else None
+    # Keepalive ping — CapSolver API call can take 10-30s; prevent Browserless
+    # from closing the idle CDP websocket during the wait.
+    await _keepalive_ping()
     try:
         token = await capsolver_solve(
             task_type=type_map[kind],
@@ -4096,10 +4099,11 @@ async def _launch_remote_instance(
 
     # 5. Store the connection as a current or non-current instance.
     #    Always mark as attached — close paths must NOT call .stop() on
-    #    the remote browser.
+    #    the remote browser. Store remote_url/remote_token for auto-reconnect.
     if instance_id == BrowserState.current_instance_id:
         _set_active_browser(browser, instance_id, attached=True, profile_dir=None,
-                            idle_timeout=idle_timeout)
+                            idle_timeout=idle_timeout,
+                            remote_url=remote_url, remote_token=remote_token)
         BrowserState.tabs = list(browser.tabs)
         BrowserState.active_tab_index = 0
     else:
@@ -4112,11 +4116,14 @@ async def _launch_remote_instance(
             idle_timeout=idle_timeout,
             last_active=time.time(),
             created_at=time.time(),
+            remote_url=remote_url,
+            remote_token=remote_token,
         )
         BrowserState.instances[instance_id] = snap
         _ATTACHED_BROWSERS.add(instance_id)
         _set_active_browser(browser, instance_id, attached=True, profile_dir=None,
-                            idle_timeout=idle_timeout)
+                            idle_timeout=idle_timeout,
+                            remote_url=remote_url, remote_token=remote_token)
         BrowserState.tabs = list(browser.tabs)
         BrowserState.active_tab_index = 0
 
@@ -6446,6 +6453,55 @@ async def _connect_remote(
     return browser, info, None
 
 
+async def _auto_reconnect_remote(
+    remote_url: str, remote_token: Optional[str],
+) -> Optional[Browser]:
+    """Reconnect to a remote browser after a stale CDP websocket.
+
+    Called by BrowserState.active_tab_with_reconnect() via the reconnect_callback
+    when a stale connection is detected. Returns a new Browser object on success,
+    or None if reconnection fails (caller resets state).
+    """
+    try:
+        target = _parse_remote_target(remote_url, remote_token)
+    except Exception:
+        return None
+    browser, _info, error = await _connect_remote(target, "reconnect")
+    if error or browser is None:
+        return None
+    _ATTACHED_BROWSERS.add("reconnect")
+    return browser
+
+
+# Wire the reconnect callback so BrowserState.active_tab_with_reconnect()
+# can re-establish a stale CDP connection without user intervention.
+BrowserState.reconnect_callback = _auto_reconnect_remote
+
+
+async def _keepalive_ping() -> None:
+    """Send a lightweight CDP command to keep the websocket alive.
+
+    Called before long-running operations (solve_captcha, etc.) to prevent
+    Browserless idle-timeout from closing the connection.
+    """
+    b = BrowserState.browser
+    if b is None:
+        return
+    conn = getattr(b, "connection", None)
+    if conn is None or getattr(conn, "closed", True):
+        return
+    try:
+        from nodriver.cdp import runtime as cdp_runtime
+        tab = b.main_tab or (b.tabs[0] if b.tabs else None)
+        if tab is not None:
+            await asyncio.wait_for(
+                tab.send(cdp_runtime.evaluate("1")),
+                timeout=3,
+            )
+    except Exception:
+        pass  # best-effort — don't fail the caller
+
+
 @mcp.tool()
 async def list_external_chrome() -> str:
     """List Chrome processes running on this machine, with their CDP debugging
@@ -6617,12 +6673,17 @@ def _set_active_browser(
     attached: bool,
     profile_dir: Optional[Path] = None,
     idle_timeout: int = 0,
+    remote_url: Optional[str] = None,
+    remote_token: Optional[str] = None,
 ) -> None:
     """Common state-write helper for attach / remote / spawn paths.
 
     attached=True marks the instance in _ATTACHED_BROWSERS so close paths
     call .connection.aclose() instead of .stop() (don't kill upstream Chrome
     or shared remote pool).
+
+    remote_url/remote_token are stored for auto-reconnect on stale CDP
+    websockets (e.g. Browserless idle timeout).
     """
     BrowserState.browser = browser
     BrowserState.current_instance_id = instance_id
@@ -6630,6 +6691,8 @@ def _set_active_browser(
     BrowserState.current_idle_timeout = idle_timeout
     BrowserState.current_last_active = time.time()
     BrowserState.current_created_at = time.time()
+    BrowserState.current_remote_url = remote_url
+    BrowserState.current_remote_token = remote_token
     if attached:
         _ATTACHED_BROWSERS.add(instance_id)
     # attached=False callers (spawn_browser / browser_launch) manage
